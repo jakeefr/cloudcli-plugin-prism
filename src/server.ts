@@ -62,7 +62,10 @@ function runPrism(args: string[]): Promise<string> {
 
     // Ask the child to stop, then force-kill if it ignores SIGTERM, so a
     // wedged prism can never leave this promise (and the request) hanging.
+    // Idempotent: a second call (e.g. timeout then overflow) must not orphan
+    // the first SIGKILL timer.
     const terminate = (): void => {
+      if (killTimer) return;
       child.kill();
       killTimer = setTimeout(() => child.kill('SIGKILL'), 5_000);
     };
@@ -109,7 +112,10 @@ function runPrism(args: string[]): Promise<string> {
 
     child.on('close', (code) => {
       // Process is gone, so the hard-kill fallback is no longer needed.
-      if (killTimer) clearTimeout(killTimer);
+      if (killTimer) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
       // Decode once, at the end: concatenating raw bytes before decoding
       // keeps multi-byte UTF-8 sequences that straddle a chunk boundary
       // intact (a per-chunk toString() would corrupt them).
