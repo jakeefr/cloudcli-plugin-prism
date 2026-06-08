@@ -63,7 +63,7 @@ function buildPrismEnv(): NodeJS.ProcessEnv {
       env.TEMP ??= path.join(home, 'AppData', 'Local', 'Temp');
       env.TMP ??= env.TEMP;
     }
-    env.SystemRoot ??= process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+    env.SystemRoot ??= process.env.windir || 'C:\\Windows';
     env.windir ??= env.SystemRoot;
     env.PATHEXT ??= '.COM;.EXE;.BAT;.CMD';
   }

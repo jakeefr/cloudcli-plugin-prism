@@ -90,6 +90,25 @@ function writeUserSiteShim(dir) {
   return shim;
 }
 
+/**
+ * Write a .cmd shim that records the APPDATA it was invoked with to a file, so
+ * a test can assert what env the backend actually handed prism. Reports a
+ * version so /health succeeds.
+ */
+function writeAppdataEchoShim(dir) {
+  const shim = path.join(dir, 'prism.cmd');
+  fs.writeFileSync(
+    shim,
+    [
+      '@echo off',
+      '> "%~dp0appdata_seen.txt" echo %APPDATA%',
+      'echo prism v9.9.9',
+      '',
+    ].join('\r\n'),
+  );
+  return shim;
+}
+
 /** Boot dist/server.js with a given PRISM_BIN and return {proc, port}. */
 function startServer(prismBin, envMutator) {
   return new Promise((resolve, reject) => {
@@ -163,6 +182,27 @@ test('health survives the host stripping APPDATA from the env (Windows)', { skip
     const json = JSON.parse(res.body);
     assert.equal(json.installed, true);
     assert.equal(json.version, '9.9.9');
+  } finally {
+    proc.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a host-supplied APPDATA is passed through unchanged, not clobbered (Windows)', { skip: !isWindows }, async () => {
+  // The env restore must only fill gaps: when the host already provides APPDATA
+  // (e.g. a venv/system install that works fine), the backend must not overwrite
+  // it with a profile-derived guess. Pins the `??=` preserve contract.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prism-shim-'));
+  const shim = writeAppdataEchoShim(dir);
+  const customAppData = path.join(dir, 'CustomRoaming');
+  const { proc, port } = await startServer(shim, (env) => {
+    env.APPDATA = customAppData;
+  });
+  try {
+    const res = await get(port, '/health');
+    assert.equal(res.status, 200, `health status (body: ${res.body})`);
+    const seen = fs.readFileSync(path.join(dir, 'appdata_seen.txt'), 'utf8').trim();
+    assert.equal(seen, customAppData, 'prism must receive the host-supplied APPDATA verbatim');
   } finally {
     proc.kill();
     fs.rmSync(dir, { recursive: true, force: true });
