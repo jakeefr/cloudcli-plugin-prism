@@ -14,6 +14,7 @@
 
 import http from 'node:http';
 import path from 'node:path';
+import os from 'node:os';
 import spawn from 'cross-spawn';
 import { buildAnalyzeArgs, parseReports, parseVersion } from './lib.js';
 
@@ -27,6 +28,49 @@ interface PrismError extends Error {
   notInstalled?: boolean;
 }
 
+/**
+ * Build the environment for the prism subprocess.
+ *
+ * The CloudCLI host launches plugin servers with a deliberately stripped env
+ * (PATH/HOME/NODE_ENV/PLUGIN_NAME only). On Windows that drops the variables a
+ * Python console-script needs to bootstrap: without `APPDATA`, CPython can't
+ * compute the per-user `site-packages` path, so a `pip install --user` prism
+ * launches its `prism.exe` shim but then dies with
+ * `ModuleNotFoundError: No module named 'prism'` — surfacing as the PRISM tab's
+ * "RPC error 400". `prism --version` works in the user's own shell precisely
+ * because that shell still has these vars; the only difference is the env.
+ *
+ * Re-derive the essentials from the real user profile (os.homedir() resolves
+ * via the OS even when USERPROFILE is unset) and fill in only what's missing,
+ * so prism's interpreter can find its packages. No effect off Windows.
+ */
+function buildPrismEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    // prism renders through a rich console; force plain, unwrapped output so
+    // the piped JSON survives intact.
+    NO_COLOR: '1',
+    TERM: 'dumb',
+    COLUMNS: '4096',
+  };
+
+  if (process.platform === 'win32') {
+    const home = process.env.USERPROFILE || os.homedir();
+    if (home) {
+      env.USERPROFILE ??= home;
+      env.APPDATA ??= path.join(home, 'AppData', 'Roaming');
+      env.LOCALAPPDATA ??= path.join(home, 'AppData', 'Local');
+      env.TEMP ??= path.join(home, 'AppData', 'Local', 'Temp');
+      env.TMP ??= env.TEMP;
+    }
+    env.SystemRoot ??= process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+    env.windir ??= env.SystemRoot;
+    env.PATHEXT ??= '.COM;.EXE;.BAT;.CMD';
+  }
+
+  return env;
+}
+
 function runPrism(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     // cross-spawn (not node:child_process) so a Windows `.cmd`/`.bat` prism
@@ -35,14 +79,9 @@ function runPrism(args: string[]): Promise<string> {
     // is never run through a shell (no quoting/injection surprises).
     const child = spawn(PRISM_BIN, args, {
       windowsHide: true,
-      env: {
-        ...process.env,
-        // prism renders through a rich console; force plain, unwrapped
-        // output so the piped JSON survives intact.
-        NO_COLOR: '1',
-        TERM: 'dumb',
-        COLUMNS: '4096',
-      },
+      // The host strips Windows-essential vars from the plugin subprocess env;
+      // restore them so a `pip install --user` prism can import its package.
+      env: buildPrismEnv(),
     });
 
     const stdoutChunks: Buffer[] = [];

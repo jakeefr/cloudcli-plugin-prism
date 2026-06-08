@@ -62,12 +62,42 @@ function writeNoSessionShim(dir) {
   return shim;
 }
 
+/**
+ * Write a .cmd shim that reproduces a `pip install --user` prism: its package
+ * lives in the per-user site-packages, which CPython only finds when `APPDATA`
+ * is set. With `APPDATA` stripped (as the host does) the real prism.exe dies
+ * with `ModuleNotFoundError: No module named 'prism'`; mimic that with a
+ * non-zero exit so the shim only "works" when the backend restores `APPDATA`.
+ */
+function writeUserSiteShim(dir) {
+  const shim = path.join(dir, 'prism.cmd');
+  fs.writeFileSync(
+    shim,
+    [
+      '@echo off',
+      'if "%APPDATA%"=="" (',
+      "  echo ModuleNotFoundError: No module named 'prism' 1>&2",
+      '  exit /b 1',
+      ')',
+      'if "%~1"=="--version" (',
+      '  echo prism v9.9.9',
+      ') else (',
+      `  echo ${REPORT_JSON}`,
+      ')',
+      '',
+    ].join('\r\n'),
+  );
+  return shim;
+}
+
 /** Boot dist/server.js with a given PRISM_BIN and return {proc, port}. */
-function startServer(prismBin) {
+function startServer(prismBin, envMutator) {
   return new Promise((resolve, reject) => {
+    const env = { ...process.env, PRISM_BIN: prismBin };
+    if (envMutator) envMutator(env);
     const proc = spawn(process.execPath, [SERVER], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PRISM_BIN: prismBin },
+      env,
     });
     let buf = '';
     const timer = setTimeout(() => reject(new Error('server never reported ready')), 15000);
@@ -103,6 +133,30 @@ test('health works when prism is a .cmd shim (Windows)', { skip: !isWindows }, a
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prism-shim-'));
   const shim = writeCmdShim(dir);
   const { proc, port } = await startServer(shim);
+  try {
+    const res = await get(port, '/health');
+    assert.equal(res.status, 200, `health status (body: ${res.body})`);
+    const json = JSON.parse(res.body);
+    assert.equal(json.installed, true);
+    assert.equal(json.version, '9.9.9');
+  } finally {
+    proc.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('health survives the host stripping APPDATA from the env (Windows)', { skip: !isWindows }, async () => {
+  // Regression guard for the real "RPC error 400": the host launches the plugin
+  // with APPDATA/USERPROFILE stripped, so a `pip install --user` prism.exe
+  // launches but can't import its package. The backend must restore APPDATA so
+  // prism's interpreter finds the user site-packages and /health returns 200.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prism-shim-'));
+  const shim = writeUserSiteShim(dir);
+  const { proc, port } = await startServer(shim, (env) => {
+    delete env.APPDATA;
+    delete env.USERPROFILE;
+    delete env.LOCALAPPDATA;
+  });
   try {
     const res = await get(port, '/health');
     assert.equal(res.status, 200, `health status (body: ${res.body})`);
