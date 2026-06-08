@@ -14,7 +14,7 @@
 
 import http from 'node:http';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import spawn from 'cross-spawn';
 import { buildAnalyzeArgs, parseReports, parseVersion } from './lib.js';
 
 // ── prism invocation ───────────────────────────────────────────────────
@@ -29,35 +29,78 @@ interface PrismError extends Error {
 
 function runPrism(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
-      PRISM_BIN,
-      args,
-      {
-        timeout: PRISM_TIMEOUT_MS,
-        maxBuffer: MAX_BUFFER,
-        env: {
-          ...process.env,
-          // prism renders through a rich console; force plain, unwrapped
-          // output so the piped JSON survives intact.
-          NO_COLOR: '1',
-          TERM: 'dumb',
-          COLUMNS: '4096',
-        },
+    // cross-spawn (not node:child_process) so a Windows `.cmd`/`.bat` prism
+    // shim — the usual shape of a pip/pipx console script — launches instead
+    // of failing with `spawn EINVAL`. Args stay an array, so the project path
+    // is never run through a shell (no quoting/injection surprises).
+    const child = spawn(PRISM_BIN, args, {
+      windowsHide: true,
+      env: {
+        ...process.env,
+        // prism renders through a rich console; force plain, unwrapped
+        // output so the piped JSON survives intact.
+        NO_COLOR: '1',
+        TERM: 'dumb',
+        COLUMNS: '4096',
       },
-      (err, stdout, stderr) => {
-        if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let settled = false;
+    let timedOut = false;
+
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, PRISM_TIMEOUT_MS);
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_BUFFER) {
+        child.kill();
+        settle(() => reject(new Error('prism output exceeded buffer limit')));
+        return;
+      }
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      settle(() => {
+        if (err.code === 'ENOENT') {
           const e: PrismError = new Error(
             'prism is not installed or not on PATH (pip install prism-cc)',
           );
           e.notInstalled = true;
           reject(e);
-        } else if (err) {
-          reject(new Error((stderr || err.message).trim()));
+        } else {
+          reject(err);
+        }
+      });
+    });
+
+    child.on('close', (code) => {
+      settle(() => {
+        if (timedOut) {
+          reject(new Error(`prism timed out after ${PRISM_TIMEOUT_MS}ms`));
+        } else if (code !== 0) {
+          reject(new Error((stderr || `prism exited with code ${code}`).trim()));
         } else {
           resolve(stdout);
         }
-      },
-    );
+      });
+    });
   });
 }
 
