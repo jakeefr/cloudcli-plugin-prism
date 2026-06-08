@@ -43,6 +43,25 @@ function writeCmdShim(dir) {
   return shim;
 }
 
+/** Write a .cmd shim mimicking prism for a project with no recorded sessions. */
+function writeNoSessionShim(dir) {
+  const shim = path.join(dir, 'prism.cmd');
+  fs.writeFileSync(
+    shim,
+    [
+      '@echo off',
+      'if "%~1"=="--version" (',
+      '  echo prism v9.9.9',
+      ') else (',
+      '  echo Project not found: no Claude Code sessions found 1>&2',
+      '  exit /b 1',
+      ')',
+      '',
+    ].join('\r\n'),
+  );
+  return shim;
+}
+
 /** Boot dist/server.js with a given PRISM_BIN and return {proc, port}. */
 function startServer(prismBin) {
   return new Promise((resolve, reject) => {
@@ -107,6 +126,36 @@ test('health reports not-installed when prism is missing (ENOENT)', async () => 
     assert.equal(json.version, null);
   } finally {
     proc.kill();
+  }
+});
+
+test('report returns empty (not 400) when project has no sessions (Windows)', { skip: !isWindows }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prism-shim-'));
+  writeNoSessionShim(dir);
+  const { proc, port } = await startServer(path.join(dir, 'prism.cmd'));
+  try {
+    const res = await get(port, '/report?path=' + encodeURIComponent('D:\\charter-clinic'));
+    assert.equal(res.status, 200, `report status (body: ${res.body})`);
+    assert.deepEqual(JSON.parse(res.body), { reports: [] });
+  } finally {
+    proc.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('report returns empty (not 400) for an unanalyzable/relative path', async () => {
+  // Drive-relative path fails the absolute-path guard; must be a no-data
+  // state, never a surfaced error.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prism-shim-'));
+  // Any prism is fine here — the guard short-circuits before it runs.
+  const { proc, port } = await startServer(isWindows ? writeCmdShim(dir) : 'prism');
+  try {
+    const res = await get(port, '/report?path=' + encodeURIComponent('D:charter-clinic'));
+    assert.equal(res.status, 200, `status (body: ${res.body})`);
+    assert.deepEqual(JSON.parse(res.body), { reports: [] });
+  } finally {
+    proc.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

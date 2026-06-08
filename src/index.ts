@@ -385,10 +385,33 @@ command not found</pre>
     });
   }
 
+  function renderNoData(ctx: PluginContext): void {
+    const c = themeColors(ctx.theme === 'dark');
+    root.style.background = c.bg;
+    root.style.color = c.text;
+    root.innerHTML = `
+      ${header(ctx, c, esc(ctx.project?.name ?? 'project'), esc(ctx.project?.path ?? ''))}
+      <div class="prism-up" style="
+        background:${c.surface};border:1px solid ${c.border};
+        border-radius:3px;padding:28px 24px;text-align:center;animation-delay:0.06s
+      ">
+        <div style="font-size:0.62rem;color:${c.muted};letter-spacing:0.12em;text-transform:uppercase;margin-bottom:10px">no session data</div>
+        <div style="font-size:0.74rem;color:${c.text};opacity:0.85;line-height:1.7">
+          PRISM has no recorded Claude Code sessions for this project yet.<br>
+          Run a session here, then hit refresh.
+        </div>
+      </div>`;
+    root.querySelector('#prism-refresh')?.addEventListener('click', () => {
+      cache = null;
+      load(api.context);
+    });
+  }
+
   function renderFromCache(ctx: PluginContext): void {
     if (!cache) return;
-    if (cache.projectPath && cache.reports[0]) {
-      renderReport(ctx, cache.reports[0]);
+    if (cache.projectPath) {
+      if (cache.reports[0]) renderReport(ctx, cache.reports[0]);
+      else renderNoData(ctx);
     } else {
       renderOverview(ctx, cache.reports);
     }

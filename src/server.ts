@@ -149,13 +149,26 @@ async function handleHealth(): Promise<{ installed: boolean; version: string | n
 }
 
 async function handleReport(projectPath: string | null): Promise<{ reports: unknown[] }> {
-  if (projectPath !== null) {
-    if (!path.isAbsolute(projectPath) || projectPath.includes('..')) {
-      throw new Error('Invalid path');
-    }
+  // A specific project that can't be analyzed is a no-data state, not an
+  // error: a suspicious/relative path (never handed to prism), a project with
+  // no recorded sessions yet, or any case where prism produces no report.
+  // Return an empty list so the tab renders a clean "no data" view instead of
+  // surfacing an error. Only "prism isn't installed" is allowed to propagate
+  // (so the install hint shows); everything else degrades to empty.
+  if (projectPath !== null && (!path.isAbsolute(projectPath) || projectPath.includes('..'))) {
+    return { reports: [] };
   }
-  const stdout = await runPrism(buildAnalyzeArgs(projectPath ?? undefined));
-  return { reports: parseReports(stdout) };
+  try {
+    const stdout = await runPrism(buildAnalyzeArgs(projectPath ?? undefined));
+    return { reports: parseReports(stdout) };
+  } catch (err) {
+    if ((err as PrismError).notInstalled) {
+      throw err;
+    }
+    // Diagnostic only — goes to the plugin server's stderr, never the user.
+    console.error('[prism] report unavailable:', (err as Error).message);
+    return { reports: [] };
+  }
 }
 
 // ── HTTP server ────────────────────────────────────────────────────────
