@@ -54,7 +54,11 @@ function startServer(prismBin) {
     const timer = setTimeout(() => reject(new Error('server never reported ready')), 15000);
     proc.stdout.on('data', (d) => {
       buf += d.toString();
-      const line = buf.split('\n').find((l) => l.includes('"ready"'));
+      // Only scan completed lines: the final split element is the in-progress
+      // tail (no trailing newline yet), so parsing it could throw on a partial
+      // ready JSON delivered across two chunks.
+      const lines = buf.split('\n');
+      const line = lines.slice(0, -1).find((l) => l.includes('"ready"'));
       if (line) {
         clearTimeout(timer);
         resolve({ proc, port: JSON.parse(line).port });

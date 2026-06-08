@@ -45,11 +45,13 @@ function runPrism(args: string[]): Promise<string> {
       },
     });
 
-    let stdout = '';
-    let stderr = '';
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
     let timedOut = false;
+    let killTimer: NodeJS.Timeout | undefined;
 
     const settle = (fn: () => void): void => {
       if (settled) return;
@@ -58,22 +60,37 @@ function runPrism(args: string[]): Promise<string> {
       fn();
     };
 
+    // Ask the child to stop, then force-kill if it ignores SIGTERM, so a
+    // wedged prism can never leave this promise (and the request) hanging.
+    const terminate = (): void => {
+      child.kill();
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 5_000);
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill();
+      terminate();
     }, PRISM_TIMEOUT_MS);
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      if (settled) return;
       stdoutBytes += chunk.length;
       if (stdoutBytes > MAX_BUFFER) {
-        child.kill();
+        terminate();
         settle(() => reject(new Error('prism output exceeded buffer limit')));
         return;
       }
-      stdout += chunk.toString();
+      stdoutChunks.push(chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
+      if (settled) return;
+      stderrBytes += chunk.length;
+      if (stderrBytes > MAX_BUFFER) {
+        terminate();
+        settle(() => reject(new Error('prism output exceeded buffer limit')));
+        return;
+      }
+      stderrChunks.push(chunk);
     });
 
     child.on('error', (err: NodeJS.ErrnoException) => {
@@ -91,6 +108,13 @@ function runPrism(args: string[]): Promise<string> {
     });
 
     child.on('close', (code) => {
+      // Process is gone, so the hard-kill fallback is no longer needed.
+      if (killTimer) clearTimeout(killTimer);
+      // Decode once, at the end: concatenating raw bytes before decoding
+      // keeps multi-byte UTF-8 sequences that straddle a chunk boundary
+      // intact (a per-chunk toString() would corrupt them).
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
       settle(() => {
         if (timedOut) {
           reject(new Error(`prism timed out after ${PRISM_TIMEOUT_MS}ms`));
