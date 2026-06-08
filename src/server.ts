@@ -165,8 +165,13 @@ async function handleReport(projectPath: string | null): Promise<{ reports: unkn
     if ((err as PrismError).notInstalled) {
       throw err;
     }
-    // Diagnostic only — goes to the plugin server's stderr, never the user.
-    console.error('[prism] report unavailable:', (err as Error).message);
+    // By product requirement the tab must never show an error, so every other
+    // failure — for a selected project AND the all-projects overview — degrades
+    // to an empty result. To avoid masking genuine faults silently, log them to
+    // the plugin server's stderr (never seen by the user), tagged so a real
+    // prism crash is distinguishable in the logs from an ordinary "no sessions".
+    const scope = projectPath === null ? 'overview' : `project ${projectPath}`;
+    console.error(`[prism] no report for ${scope}: ${(err as Error).message}`);
     return { reports: [] };
   }
 }
